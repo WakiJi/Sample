@@ -124,7 +124,7 @@ jobs:
         JSON_DATA=$(jq -n \
           --arg token "$PUSHPLUS_TOKEN" \
           --arg title "WM扫描完成" \
-          --arg content "找到 $TOTAL 个有效链接\\n样例：\\n$SAMPLE\\n完整结果：https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          --arg content "找到 $TOTAL 个有效链接 \n 样例：\n $SAMPLE \n 完整结果：https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
           --arg template "json" \
           '{token: $token, title: $title, content: $content, template: $template}')
 
