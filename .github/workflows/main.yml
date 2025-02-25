@@ -90,7 +90,8 @@ jobs:
           --start_date $START_DATE \
           --end_date $END_DATE \
           --start_time ${START_TIME:0:6} \
-          --end_time ${END_TIME:0:6}
+          --end_time ${END_TIME:0:6} \
+          --workers "500"
 
       
     - name: Upload results
