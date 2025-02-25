@@ -1,0 +1,141 @@
+name: Scheduled File Scanner
+
+on:
+  schedule:
+    # UTC时间对应北京时间每日04:00运行（UTC+8 12:00）
+    - cron: '0 4 * * *'
+    # 2月3日04:00 UTC（即北京时间12:00）
+    # 每日示例（UTC时间16:00对应北京时间次日00:00）
+    - cron: '0 16 * * *'
+    # 每日UTC 16:00（北京时间次日00:00）
+
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: 'Branches to run the workflow on'
+        required: false
+        default: 'autoscan'
+
+env:
+  TZ: Asia/Shanghai  # 设置时区为UTC+8
+  SCAN_OFFSET_HOURS: 0  # 自定义参数：扫描时间偏移小时数
+  SCAN_DURATION: 12     # 自定义参数：扫描时长（小时）
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      start_date: ${{ steps.calc.outputs.start_date }}
+      end_date: ${{ steps.calc.outputs.end_date }}
+      start_time: ${{ steps.calc.outputs.start_time }}
+      end_time: ${{ steps.calc.outputs.end_time }}
+    steps:
+    - name: Setup timezone
+      run: sudo timedatectl set-timezone $TZ
+
+    - name: Calculate precise time range
+      id: calc
+      run: |
+        # 计算基准时间（当前执行时间 - 偏移量）
+        base_ts=$(date -d "$((SCAN_OFFSET_HOURS)) hours ago" +%s)
+        
+        # 计算精确起止时间戳
+        start_ts=$((base_ts - SCAN_DURATION*3600))
+        end_ts=$base_ts
+        
+        # 转换为日期时间组件
+        start_date=$(date -d "@$start_ts" +"%Y%m%d")
+        start_time=$(date -d "@$start_ts" +"%H%M%S")
+        end_date=$(date -d "@$end_ts" +"%Y%m%d")
+        end_time=$(date -d "@$end_ts" +"%H%M%S")
+
+        # 处理跨日情况
+        if [ "$start_date" != "$end_date" ]; then
+          end_time="235959"  # 当跨日时结束时间为起始日23:59:59
+          end_date="$start_date"
+        fi
+
+        echo "start_date=$start_date" >> $GITHUB_OUTPUT
+        echo "start_time=$start_time" >> $GITHUB_OUTPUT
+        echo "end_date=$end_date" >> $GITHUB_OUTPUT
+        echo "end_time=$end_time" >> $GITHUB_OUTPUT
+  scan:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: |
+            sudo apt-get install jq
+
+    - name: Install ano dependencies
+      run: |
+           pip install urllib3 tqdm python-dateutil requests
+
+    - name: Run scanner
+      env:
+        START_DATE: ${{ needs.prepare.outputs.start_date }}
+        END_DATE: ${{ needs.prepare.outputs.end_date }}
+        START_TIME: ${{ needs.prepare.outputs.start_time }}
+        END_TIME: ${{ needs.prepare.outputs.end_time }}
+      run: |
+        python scan_script.py \
+          --base "SDGB_A061" \
+          --start_date $START_DATE \
+          --end_date $END_DATE \
+          --start_time ${START_TIME:0:6} \
+          --end_time ${END_TIME:0:6}
+
+      
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: scan-results-${{ needs.prepare.outputs.scan_date }}
+        path: valid_links.txt
+      
+  result-aggregator:
+    needs: scan
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: links-chunk-*
+        path: artifacts
+      
+    - name: Merge results
+      run: |
+        find artifacts -name 'valid_links*.txt' -exec cat {} + | sort -u > combined_links.txt
+        echo "Total links: $(wc -l < combined_links.txt)"
+
+    - name: Send notification
+      env:
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      run: |
+        SAMPLE=$(head -n5 combined_links.txt | sed 's/_0\.opt$//')
+        TOTAL=$(wc -l < combined_links.txt)
+        # 使用jq生成安全的JSON数据
+        JSON_DATA=$(jq -n \
+          --arg token "$PUSHPLUS_TOKEN" \
+          --arg title "WM扫描完成" \
+          --arg content "找到 $TOTAL 个有效链接\\n样例：\\n$SAMPLE\\n完整结果：https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          --arg template "json" \
+          '{token: $token, title: $title, content: $content, template: $template}')
+
+        # 发送请求
+        response=$(curl -sS -X POST "https://www.pushplus.plus/api/send" \
+          -H "Content-Type: application/json" \
+          -d "$JSON_DATA")
+          
+    - name: Debug output
+      run: |
+        echo "Scan Date: ${{ needs.prepare.outputs.scan_date }}"
+        echo "Start Time: ${{ needs.prepare.outputs.scan_start }}"
+        echo "End Time: ${{ needs.prepare.outputs.scan_end }}"
