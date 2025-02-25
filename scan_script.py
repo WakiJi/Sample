@@ -151,7 +151,7 @@ def main():
     parser.add_argument('--end_date', required=True, help='结束日期')
     parser.add_argument('--start_time', default='000000', help='每日起始时间')
     parser.add_argument('--end_time', default='235959', help='每日结束时间')
-    parser.add_argument('--workers', type=int, default=50, help='并发线程数')
+    parser.add_argument('--workers', type=int, default=500, help='并发线程数')
     parser.add_argument('--timeout', type=int, default=19800, help='最大运行时间(秒)')
     parser.add_argument('--resume-file', default='progress.log', help='断点记录文件')
     args = parser.parse_args()
