@@ -1,0 +1,85 @@
+name: WM
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: '文件基础名称 (如 SDGB_A061)'
+        required: true
+        default: 'SDGB_A061'
+      start_date:
+        description: '开始日期 (格式 YYYYMMDD)'
+        required: true
+      end_date:
+        description: '结束日期 (格式 YYYYMMDD)'
+        required: true
+      start_time:
+        description: '每日开始时间 (格式 HHMMSS)'
+        default: '000000'
+      end_time:
+        description: '每日结束时间 (格式 HHMMSS)'
+        default: '235959'
+      workers:
+        description: '并发线程数'
+        default: '50'
+
+jobs:
+  generate-links:
+    runs-on: ubuntu-latest
+    env:
+      WM_DOMAIN: ${{ secrets.WM_DOMAIN }}
+      WM_PATH: ${{ secrets.WM_PATH }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip install requests tqdm python-dateutil
+           sudo apt-get install jq
+    
+    - name: Debug
+      run: |
+        echo "::add-mask::$PUSHPLUS_TOKEN"  # 隐藏敏感信息
+        echo "Token前三位: ${PUSHPLUS_TOKEN:0:3}"
+        echo "系统时间: $(date)"
+        echo "GitHub上下文: ${{ toJson(github) }}"
+
+    - name: Run link generator
+      id: generator
+      run: |
+        python modified_script.py \
+          --base "${{ github.event.inputs.base }}" \
+          --start_date "${{ github.event.inputs.start_date }}" \
+          --end_date "${{ github.event.inputs.end_date }}" \
+          --start_time "${{ github.event.inputs.start_time }}" \
+          --end_time "${{ github.event.inputs.end_time }}" \
+          --workers "${{ github.event.inputs.workers }}"
+        echo "total_links=$(wc -l < valid_links.txt)" >> $GITHUB_OUTPUT
+        echo "links=$(base64 -w0 valid_links.txt)" >> $GITHUB_OUTPUT
+
+    - name: Send notification
+      env:
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      run: |
+        LINKS=$(echo "${{ steps.generator.outputs.links }}" | base64 -d)
+        SAMPLE=$(echo "$LINKS" | head -n 5)
+        MESSAGE="找到 ${{ steps.generator.outputs.total_links }} 个有效链接：\\n${SAMPLE}\\n......完整列表：https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+        # 使用jq生成安全的JSON数据
+        JSON_DATA=$(jq -n \
+          --arg token "$PUSHPLUS_TOKEN" \
+          --arg title "WM扫描完成" \
+          --arg content "$MESSAGE" \
+          --arg template "json" \
+          '{token: $token, title: $title, content: $content, template: $template}')
+
+        # 发送请求
+        response=$(curl -sS -X POST "https://www.pushplus.plus/api/send" \
+          -H "Content-Type: application/json" \
+          -d "$JSON_DATA")
