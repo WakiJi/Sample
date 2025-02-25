@@ -1,0 +1,151 @@
+name: WM Link Generator Pro
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: '基础文件标识 (例: SDGB_A061)'
+        required: true
+        default: 'SDGB_A061'
+      start_date:
+        description: '起始日期 (YYYYMMDD)'
+        required: true
+      end_date:
+        description: '结束日期 (YYYYMMDD)'
+        required: true
+      start_time:
+        description: '每日起始时间'
+        default: '000000'
+      end_time:
+        description: '每日结束时间'
+        default: '235959'
+      chunk_days:
+        description: '日期分片大小'
+        default: '2'
+      workers_per_job:
+        description: '并发线程数/任务'
+        default: '80'
+
+jobs:
+  date-splitter:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.date-split.outputs.matrix }}
+    steps:
+
+    - name: Debug
+      env:
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      run: |
+        echo "::add-mask::$PUSHPLUS_TOKEN"  # 隐藏敏感信息
+        echo "Token前三位: ${PUSHPLUS_TOKEN:0:3}"
+        echo "系统时间: $(date)"
+        echo "GitHub上下文: ${{ toJson(github) }}"
+
+    - name: Install dependencies
+      run: sudo apt-get install jq
+
+    - name: Calculate date chunks
+      id: date-split
+      env:
+        START_DATE: ${{ inputs.start_date }}
+        END_DATE: ${{ inputs.end_date }}
+        CHUNK_DAYS: ${{ inputs.chunk_days }}
+      run: |
+        start_ts=$(date -d "${START_DATE:0:4}-${START_DATE:4:2}-${START_DATE:6:2}" +%s)
+        end_ts=$(date -d "${END_DATE:0:4}-${END_DATE:4:2}-${END_DATE:6:2}" +%s)
+        total_days=$(( (end_ts - start_ts) / 86400 + 1 ))
+        chunks=$(( (total_days + CHUNK_DAYS - 1) / CHUNK_DAYS ))
+        
+        matrix_json=$(jq -n --argjson chunks $chunks '{
+          "include": [range(0; $chunks) | {"chunk": .}]
+        }' | jq -c .)
+        
+        echo "matrix=$matrix_json" >> $GITHUB_OUTPUT
+
+  link-processor:
+    needs: date-splitter
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.date-splitter.outputs.matrix) }}
+    env:
+      WM_DOMAIN: ${{ secrets.WM_DOMAIN }}
+      WM_PATH: ${{ secrets.WM_PATH }}
+      MAX_RUNTIME: 19800
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip install requests tqdm python-dateutil
+
+    - name: Calculate chunk dates
+      id: chunk-calc
+      run: |
+        start_ts=$(date -d "${{ inputs.start_date }}" +%s)
+        chunk_start=$(( start_ts + ${{ matrix.chunk }} * ${{ inputs.chunk_days }} * 86400 ))
+        chunk_end=$(( chunk_start + (${{ inputs.chunk_days }} - 1) * 86400 ))
+        
+        original_end=$(date -d "${{ inputs.end_date }}" +%s)
+        [ $chunk_end -gt $original_end ] && chunk_end=$original_end
+        
+        echo "start_date=$(date -d @$chunk_start +%Y%m%d)" >> $GITHUB_OUTPUT
+        echo "end_date=$(date -d @$chunk_end +%Y%m%d)" >> $GITHUB_OUTPUT
+
+    - name: Run scanner
+      run: |
+        python wm_script.py \
+          --base "${{ inputs.base }}" \
+          --start_date "${{ steps.chunk-calc.outputs.start_date }}" \
+          --end_date "${{ steps.chunk-calc.outputs.end_date }}" \
+          --start_time "${{ inputs.start_time }}" \
+          --end_time "${{ inputs.end_time }}" \
+          --workers "${{ inputs.workers_per_job }}" \
+          --timeout $MAX_RUNTIME \
+          --resume-file "progress_${{ matrix.chunk }}.log"
+
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: links-chunk-${{ matrix.chunk }}
+        path: valid_links.txt
+        retention-days: 1
+
+  result-aggregator:
+    needs: link-processor
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        pattern: links-chunk-*
+        path: artifacts
+
+    - name: Merge results
+      run: |
+        find artifacts -name 'valid_links*.txt' -exec cat {} + | sort -u > combined_links.txt
+        echo "Total links: $(wc -l < combined_links.txt)"
+
+    - name: Send notification
+      env:
+        PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      run: |
+        SAMPLE=$(head -n5 combined_links.txt | sed 's/_0\.opt$//')
+        TOTAL=$(wc -l < combined_links.txt)
+        # 使用jq生成安全的JSON数据
+        JSON_DATA=$(jq -n \
+          --arg token "$PUSHPLUS_TOKEN" \
+          --arg title "WM扫描完成" \
+          --arg content "找到 $TOTAL 个有效链接\\n样例：\\n$SAMPLE\\n完整结果：https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+          --arg template "json" \
+          '{token: $token, title: $title, content: $content, template: $template}')
+
+        # 发送请求
+        response=$(curl -sS -X POST "https://www.pushplus.plus/api/send" \
+          -H "Content-Type: application/json" \
+          -d "$JSON_DATA")
