@@ -3,10 +3,9 @@ name: Scheduled File Scanner
 on:
   schedule:
     # UTC时间对应北京时间每日04:00运行（UTC+8 12:00）
-    - cron: "0 4 * * *"
+    - cron: "0 4,16 * * *"
     # 2月3日04:00 UTC（即北京时间12:00）
     # 每日示例（UTC时间16:00对应北京时间次日00:00）
-    - cron: "0 16 * * *"
     # 每日UTC 16:00（北京时间次日00:00）
 
   workflow_dispatch:
